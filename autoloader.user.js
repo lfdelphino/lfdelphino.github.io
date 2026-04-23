@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BG1 Autoloader
 // @namespace    https://bg1.local/
-// @version      1.9
+// @version      1.10
 // @description  Load BG1 (local or prod), auto-refresh targets, and optionally auto-modify on match
 // @author       Luiz Delphino
 // @match        https://disneyworld.disney.go.com/vas/
@@ -72,6 +72,8 @@ async function initAutoFinder() {
   let optionRefreshPending = false;
   let evaluatePending = false;
   let modifyInProgress = false;
+  const noEligibleRetryUntil = new Map();
+  const NO_ELIGIBLE_COOLDOWN_MS = 5_000;
 
   const panel = document.createElement('div');
   panel.id = 'bg1af-panel';
@@ -491,6 +493,20 @@ async function initAutoFinder() {
     return attrBtn instanceof HTMLButtonElement ? attrBtn : null;
   }
 
+  function hasNoEligibleGuestsState() {
+    const headings = Array.from(
+      document.querySelectorAll('h1, h2, h3, [role="heading"], p')
+    )
+      .map(el => normalizeText(el.textContent).toLowerCase())
+      .filter(Boolean);
+    return headings.some(
+      text =>
+        text.includes('no eligible guests') ||
+        text.includes('unable to modify') ||
+        text.includes('no one in your party is currently eligible')
+    );
+  }
+
   async function exitModifyFlow() {
     const dismissBtn = findDismissButton();
     if (dismissBtn) {
@@ -508,6 +524,7 @@ async function initAutoFinder() {
 
   async function chooseEarliestReturnTime(targetMinutes) {
     return waitForValue(() => {
+      if (hasNoEligibleGuestsState()) return { noEligible: true };
       const buttons = Array.from(
         document.querySelectorAll('[data-testid="time-buttons"] button')
       ).filter(isVisible);
@@ -531,6 +548,13 @@ async function initAutoFinder() {
   }
 
   async function autoModifyMatch(hit) {
+    const setNoEligibleCooldown = () => {
+      noEligibleRetryUntil.set(
+        hit.attraction,
+        Date.now() + NO_ELIGIBLE_COOLDOWN_MS
+      );
+    };
+
     const row = findAttractionRow(hit.attraction);
     if (!row) {
       setStatus(`Auto-modify retry: ${hit.attraction} row not found.`);
@@ -545,6 +569,19 @@ async function initAutoFinder() {
 
     setStatus(`Auto-modify: opening ${hit.attraction}...`);
     llButton.click();
+    const noEligibleScreen = await waitForValue(
+      () => (hasNoEligibleGuestsState() ? true : null),
+      1800,
+      120
+    );
+    if (noEligibleScreen) {
+      setNoEligibleCooldown();
+      setStatus(
+        `${hit.attraction}: no eligible guests right now. Retrying later...`
+      );
+      await exitModifyFlow();
+      return 'retry';
+    }
 
     const targetMinutes = hit.target ? parseTimeToMinutes(hit.target) : null;
     if (targetMinutes !== null) {
@@ -561,6 +598,14 @@ async function initAutoFinder() {
         targetMinutes === null ? '' : ` <= ${minutesToTime(targetMinutes)}`;
       setStatus(
         `Auto-modify: no selectable return time${targetSuffix} for ${hit.attraction}. Continuing search...`
+      );
+      await exitModifyFlow();
+      return 'retry';
+    }
+    if (selected.noEligible) {
+      setNoEligibleCooldown();
+      setStatus(
+        `${hit.attraction}: no eligible guests right now. Retrying later...`
       );
       await exitModifyFlow();
       return 'retry';
@@ -673,7 +718,27 @@ async function initAutoFinder() {
           setStatus('Auto-modify already in progress...');
           return false;
         }
-        const firstHit = hits[0];
+        const now = Date.now();
+        const readyHits = hits.filter(
+          h => (noEligibleRetryUntil.get(h.attraction) || 0) <= now
+        );
+        const blockedHits = hits.filter(
+          h => (noEligibleRetryUntil.get(h.attraction) || 0) > now
+        );
+        if (readyHits.length === 0 && blockedHits.length > 0) {
+          const nextRetry = Math.max(
+            1,
+            Math.ceil(
+              ((noEligibleRetryUntil.get(blockedHits[0].attraction) || now) - now) /
+                1000
+            )
+          );
+          setStatus(
+            `Match found but waiting eligibility retry (${blockedHits.length} blocked, next in ~${nextRetry}s).`
+          );
+          return false;
+        }
+        const firstHit = readyHits[0];
         if (firstHit) {
           setStatus(`Match found. Auto-modifying: ${firstHit.attraction}...`);
           modifyInProgress = true;
