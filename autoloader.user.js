@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BG1 Autoloader
 // @namespace    https://bg1.local/
-// @version      1.6
+// @version      1.8
 // @description  Load BG1 (local or prod), auto-refresh targets, and optionally auto-modify on match
 // @author       Luiz Delphino
 // @match        https://disneyworld.disney.go.com/vas/
@@ -76,14 +76,15 @@ async function initAutoFinder() {
   panel.id = 'bg1af-panel';
   panel.style.cssText = [
     'position:fixed',
-    'right:12px',
-    'bottom:12px',
+    'right:8px',
+    'bottom:8px',
     'z-index:2147483647',
     'background:#111',
     'color:#fff',
     'padding:10px',
     'border-radius:8px',
-    'width:320px',
+    'width:min(320px,calc(100vw - 16px))',
+    'max-width:calc(100vw - 16px)',
     'font:12px/1.35 Arial,sans-serif',
     'box-shadow:0 8px 24px rgba(0,0,0,.45)',
   ].join(';');
@@ -140,12 +141,28 @@ async function initAutoFinder() {
 
   autoModifyInput.checked = settings.autoModify;
 
-  const panelPos = loadPanelPos();
-  if (panelPos) {
-    panel.style.left = `${panelPos.x}px`;
-    panel.style.top = `${panelPos.y}px`;
+  const PANEL_MARGIN = 8;
+  function clampPanelPos(x, y) {
+    const maxX = Math.max(PANEL_MARGIN, window.innerWidth - panel.offsetWidth - PANEL_MARGIN);
+    const maxY = Math.max(PANEL_MARGIN, window.innerHeight - panel.offsetHeight - PANEL_MARGIN);
+    return {
+      x: Math.max(PANEL_MARGIN, Math.min(maxX, Math.round(x))),
+      y: Math.max(PANEL_MARGIN, Math.min(maxY, Math.round(y))),
+    };
+  }
+
+  function applyPanelPos(pos) {
+    panel.style.left = `${pos.x}px`;
+    panel.style.top = `${pos.y}px`;
     panel.style.right = 'auto';
     panel.style.bottom = 'auto';
+  }
+
+  const panelPos = loadPanelPos();
+  if (panelPos) {
+    const clamped = clampPanelPos(panelPos.x, panelPos.y);
+    applyPanelPos(clamped);
+    savePanelPos(clamped);
   }
 
   let drag;
@@ -161,37 +178,48 @@ async function initAutoFinder() {
 
   function onDragMove(event) {
     if (!drag || event.pointerId !== drag.pointerId) return;
-    const maxX = Math.max(0, window.innerWidth - panel.offsetWidth);
-    const maxY = Math.max(0, window.innerHeight - panel.offsetHeight);
-    const x = Math.max(0, Math.min(maxX, event.clientX - drag.offsetX));
-    const y = Math.max(0, Math.min(maxY, event.clientY - drag.offsetY));
-    panel.style.left = `${Math.round(x)}px`;
-    panel.style.top = `${Math.round(y)}px`;
-    panel.style.right = 'auto';
-    panel.style.bottom = 'auto';
+    const pos = clampPanelPos(event.clientX - drag.offsetX, event.clientY - drag.offsetY);
+    applyPanelPos(pos);
   }
 
   function onDragEnd(event) {
     if (!drag || event.pointerId !== drag.pointerId) return;
     dragHandle.releasePointerCapture(event.pointerId);
     drag = undefined;
-    savePanelPos({
-      x: parseInt(panel.style.left, 10) || 0,
-      y: parseInt(panel.style.top, 10) || 0,
-    });
+    const pos = clampPanelPos(parseInt(panel.style.left, 10) || 0, parseInt(panel.style.top, 10) || 0);
+    applyPanelPos(pos);
+    savePanelPos(pos);
   }
 
   dragHandle.addEventListener('pointerdown', onDragStart);
   dragHandle.addEventListener('pointermove', onDragMove);
   dragHandle.addEventListener('pointerup', onDragEnd);
   dragHandle.addEventListener('pointercancel', onDragEnd);
+  window.addEventListener('resize', () => {
+    if (panel.style.right !== 'auto' || panel.style.bottom !== 'auto') return;
+    const pos = clampPanelPos(parseInt(panel.style.left, 10) || PANEL_MARGIN, parseInt(panel.style.top, 10) || PANEL_MARGIN);
+    applyPanelPos(pos);
+    savePanelPos(pos);
+  });
 
   function setStatus(text) {
     status.textContent = text;
   }
 
   function getAttractionRows() {
-    return Array.from(document.querySelectorAll('ul[data-testid] li'));
+    const primary = Array.from(document.querySelectorAll('ul[data-testid] li'));
+    if (primary.length > 0) return primary;
+
+    const liFallback = Array.from(document.querySelectorAll('li')).filter(li => {
+      if (!li.querySelector('h3')) return false;
+      const text = li.textContent || '';
+      return /\bLL\b/i.test(text) || !!li.querySelector('time[datetime], button');
+    });
+    if (liFallback.length > 0) return liFallback;
+
+    return Array.from(document.querySelectorAll('h3'))
+      .map(h => h.closest('li, article, section, [role="listitem"]') || h.parentElement)
+      .filter((row, index, all) => !!row && all.indexOf(row) === index);
   }
 
   function attractionNames() {
@@ -725,7 +753,6 @@ async function initAutoFinder() {
   }
 
   const observer = new MutationObserver(mutations => {
-    if (!running) return;
     const hasExternalChange = mutations.some(
       m => !(m.target instanceof Node) || !panel.contains(m.target)
     );
@@ -734,6 +761,8 @@ async function initAutoFinder() {
     scheduleEvaluateFromDom();
   });
   observer.observe(document.body, { childList: true, subtree: true });
+  self.setTimeout(scheduleOptionsRefresh, 300);
+  self.setTimeout(scheduleOptionsRefresh, 1500);
 }
 
 function clampInterval(value) {
