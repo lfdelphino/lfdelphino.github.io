@@ -1,18 +1,13 @@
 // ==UserScript==
 // @name         BG1 Autoloader
 // @namespace    https://bg1.local/
-// @version      1.4
+// @version      1.6
 // @description  Load BG1 (local or prod), auto-refresh targets, and optionally auto-modify on match
 // @author       Luiz Delphino
-// @match        https://localhost:3000/bg1/*
-// @match        http://localhost:3000/bg1/*
-// @match        https://joelface.github.io/bg1/*
 // @match        https://disneyworld.disney.go.com/vas/
 // @match        https://disneyworld.disney.go.com/*/vas/
 // @match        https://disneyland.disney.go.com/vas/
 // @match        https://disneyland.disney.go.com/*/vas/
-// @match        https://vqguest-svc-wdw.wdprapps.disney.com/application/v1/guest/getQueues
-// @match        https://vqguest-svc.wdprapps.disney.com/application/v1/guest/getQueues
 // @grant        none
 // ==/UserScript==
 'use strict';
@@ -35,16 +30,30 @@ const bg1BaseUrl = (CONFIG.mode === 'local'
 ).replace(/\/?$/, '/');
 
 const entryScript = CONFIG.mode === 'local' ? 'bg1-dev.ts' : 'bg1.js';
+const BOOT_FLAG = '__bg1AutoloaderBootedV1';
 
-injectBg1();
-waitForElement('button[title="Refresh Experiences"]', 60_000)
-  .then(initAutoFinder)
-  .catch(() => undefined);
+if (window.self !== window.top) {
+  // Prevent running inside nested frames.
+} else if (window[BOOT_FLAG]) {
+  // Prevent duplicate execution on the same page context.
+} else if (
+  location.href.startsWith(bg1BaseUrl) ||
+  document.documentElement?.getAttribute('data-bg1-autoloader-injected') ===
+    '1'
+) {
+  // Prevent recursive execution/injection loops.
+} else {
+  window[BOOT_FLAG] = true;
+  injectBg1();
+  waitForElement('button[title="Refresh Experiences"]', 60_000)
+    .then(initAutoFinder)
+    .catch(() => undefined);
+}
 
 function injectBg1() {
   document.open();
   document.write(
-    `<!doctype html><html><head><link rel="stylesheet" href="${bg1BaseUrl}bg1.css"></head><body></body></html>`
+    `<!doctype html><html data-bg1-autoloader-injected="1"><head><link rel="stylesheet" href="${bg1BaseUrl}bg1.css"></head><body></body></html>`
   );
   document.close();
 
