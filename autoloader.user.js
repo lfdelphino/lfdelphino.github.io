@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BG1 Autoloader
 // @namespace    https://bg1.local/
-// @version      1.10
+// @version      1.12
 // @description  Load BG1 (local or prod), auto-refresh targets, and optionally auto-modify on match
 // @author       Luiz Delphino
 // @match        https://disneyworld.disney.go.com/vas/
@@ -73,7 +73,7 @@ async function initAutoFinder() {
   let evaluatePending = false;
   let modifyInProgress = false;
   const noEligibleRetryUntil = new Map();
-  const NO_ELIGIBLE_COOLDOWN_MS = 5_000;
+  const NO_ELIGIBLE_COOLDOWN_MS = 90_000;
 
   const panel = document.createElement('div');
   panel.id = 'bg1af-panel';
@@ -97,8 +97,9 @@ async function initAutoFinder() {
       <span id="bg1af-mode" style="opacity:.75;">${CONFIG.mode.toUpperCase()}</span>
     </div>
 
-    <label style="display:block;margin-bottom:6px;">Attraction Targets</label>
+    <label style="display:block;margin-bottom:6px;">Attractions to Watch/Modify</label>
     <div id="bg1af-watch-list" style="display:flex;flex-direction:column;gap:6px;margin-bottom:6px;"></div>
+    <div style="opacity:.75;margin-bottom:6px;">In auto-modify mode, target time is ignored and each plan party is modified only if an earlier time exists.</div>
     <div style="display:flex;gap:8px;margin-bottom:8px;">
       <button id="bg1af-add-watch" style="flex:1;padding:6px;border:0;border-radius:5px;background:#2d5d95;color:#fff;font-weight:700;cursor:pointer;">+ Add Attraction</button>
     </div>
@@ -288,7 +289,7 @@ async function initAutoFinder() {
     row.style.cssText = 'display:grid;grid-template-columns:1fr auto auto;gap:6px;';
     row.innerHTML = `
       <select class="bg1af-watch-attraction" style="width:100%;padding:5px;border-radius:4px;border:1px solid #444;background:#222;color:#fff;"></select>
-      <input class="bg1af-watch-target" type="time" title="Target Earliest Time" style="width:92px;padding:5px;border-radius:4px;border:1px solid #444;background:#222;color:#fff;" />
+      <input class="bg1af-watch-target" type="time" title="Target Earliest Time (alert mode only)" style="width:92px;padding:5px;border-radius:4px;border:1px solid #444;background:#222;color:#fff;" />
       <button class="bg1af-watch-remove" title="Remove target" style="width:30px;padding:0;border:0;border-radius:4px;background:#7a2d2d;color:#fff;font-weight:700;cursor:pointer;">×</button>
     `;
 
@@ -312,10 +313,12 @@ async function initAutoFinder() {
     removeBtn.addEventListener('click', () => {
       row.remove();
       if (getWatchRows().length === 0) createWatchRow();
+      updateTargetInputsState();
       saveCurrentSettings();
     });
 
     watchList.appendChild(row);
+    updateTargetInputsState();
   }
 
   function syncWatchRows() {
@@ -328,6 +331,16 @@ async function initAutoFinder() {
       const attractionInput = row.querySelector('.bg1af-watch-attraction');
       if (!(attractionInput instanceof HTMLSelectElement)) continue;
       populateAttractionSelect(attractionInput, attractionInput.value);
+    }
+  }
+
+  function updateTargetInputsState() {
+    const disableTarget = autoModifyInput.checked;
+    for (const row of getWatchRows()) {
+      const targetInput = row.querySelector('.bg1af-watch-target');
+      if (!(targetInput instanceof HTMLInputElement)) continue;
+      targetInput.disabled = disableTarget;
+      targetInput.style.opacity = disableTarget ? '0.45' : '1';
     }
   }
 
@@ -425,11 +438,82 @@ async function initAutoFinder() {
   const normalizeText = text => (text || '').replace(/\s+/g, ' ').trim();
   const isVisible = elem =>
     !!elem && !!(elem.offsetWidth || elem.offsetHeight || elem.getClientRects().length);
+  const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
   function findButtonByText(pattern) {
     return Array.from(document.querySelectorAll('button')).find(
       btn => isVisible(btn) && pattern.test(normalizeText(btn.textContent))
     );
+  }
+
+  function isOnLlTab() {
+    const refreshBtn = document.querySelector('button[title="Refresh Experiences"]');
+    return refreshBtn instanceof HTMLButtonElement;
+  }
+
+  function isOnPlansTab() {
+    const refreshBtn = document.querySelector('button[title="Refresh Plans"]');
+    return refreshBtn instanceof HTMLButtonElement;
+  }
+
+  function hasHomeTabButtons() {
+    return (
+      findButtonByText(/^ll$/i) instanceof HTMLButtonElement &&
+      findButtonByText(/^plans$/i) instanceof HTMLButtonElement
+    );
+  }
+
+  async function ensureHomeTabButtons(timeoutMs = 10000) {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      if (hasHomeTabButtons()) return true;
+      const backBtn = document.querySelector('button[title="Go Back"]');
+      if (backBtn instanceof HTMLButtonElement && isVisible(backBtn)) {
+        backBtn.click();
+        // eslint-disable-next-line no-await-in-loop
+        await sleep(250);
+        continue;
+      }
+      // eslint-disable-next-line no-await-in-loop
+      await sleep(120);
+    }
+    return false;
+  }
+
+  async function switchToTab(tabName) {
+    const wantsLl = tabName === 'LL';
+    if ((wantsLl && isOnLlTab()) || (!wantsLl && isOnPlansTab())) return true;
+
+    if (!(await ensureHomeTabButtons())) return false;
+
+    const tabBtn = await waitForValue(
+      () => findButtonByText(wantsLl ? /^ll$/i : /^plans$/i),
+      4000,
+      120
+    );
+    if (!(tabBtn instanceof HTMLButtonElement)) return false;
+    tabBtn.click();
+
+    const switched = await waitForValue(
+      () => ((wantsLl ? isOnLlTab() : isOnPlansTab()) ? true : null),
+      6000,
+      120
+    );
+    return !!switched;
+  }
+
+  async function ensurePlansContextForModify() {
+    if (!(await switchToTab('Plans'))) return false;
+    const ready = await waitForValue(
+      () => (isOnPlansTab() ? true : null),
+      3000,
+      120
+    );
+    return !!ready;
+  }
+
+  async function returnToLLForPolling() {
+    await switchToTab('LL');
   }
 
   function findLlActionButton(row) {
@@ -465,6 +549,64 @@ async function initAutoFinder() {
       return parseTimeToMinutes(normalizeText(timeEl.textContent));
     }
     return parseTimeToMinutes(normalizeText(button.textContent));
+  }
+
+  function parsePlanRowStartMinutes(row) {
+    const firstTime = row.querySelector('time[datetime], time');
+    if (firstTime instanceof HTMLTimeElement) {
+      const byAttr = parseTimeToMinutes(firstTime.getAttribute('datetime') || '');
+      if (byAttr !== null) return byAttr;
+      const byText = parseTimeToMinutes(firstTime.textContent || '');
+      if (byText !== null) return byText;
+    }
+
+    const rowText = normalizeText(row.textContent);
+    const match = rowText.match(
+      /(\d{1,2}:\d{2}(?::\d{2})?\s*[ap]m|\d{1,2}:\d{2}(?::\d{2})?)/i
+    );
+    if (!match) return -1;
+    const parsed = parseTimeToMinutes(match[1] || '');
+    return parsed === null ? -1 : parsed;
+  }
+
+  function getPlanRowsForAttraction(attraction) {
+    const target = normalizeText(attraction).toLowerCase();
+    const rows = Array.from(document.querySelectorAll('li[data-testid="plan"]'));
+
+    return rows
+      .map((row, index) => {
+        const nameEl =
+          row.querySelector('div.text-lg') ||
+          row.querySelector('div[class*="text-lg"]');
+        const name = normalizeText(nameEl?.textContent || '');
+        const nameLower = name.toLowerCase();
+        const matchesAttraction =
+          !!name &&
+          (nameLower === target ||
+            nameLower.includes(target) ||
+            target.includes(nameLower));
+        if (!matchesAttraction) return null;
+
+        const modifyButton = Array.from(row.querySelectorAll('button')).find(
+          btn =>
+            btn instanceof HTMLButtonElement &&
+            isVisible(btn) &&
+            /^modify$/i.test(normalizeText(btn.textContent))
+        );
+        if (!(modifyButton instanceof HTMLButtonElement)) return null;
+
+        const startMinutes = parsePlanRowStartMinutes(row);
+        if (startMinutes < 0) return null;
+        return {
+          row,
+          name,
+          startMinutes,
+          modifyButton,
+          key: `${nameLower}|${startMinutes}|${index}`,
+        };
+      })
+      .filter(Boolean)
+      .sort((a, b) => b.startMinutes - a.startMinutes);
   }
 
   async function waitForValue(fn, timeoutMs = 15000, intervalMs = 150) {
@@ -522,7 +664,7 @@ async function initAutoFinder() {
     return false;
   }
 
-  async function chooseEarliestReturnTime(targetMinutes) {
+  async function chooseEarliestReturnTime(maxMinutesExclusive) {
     return waitForValue(() => {
       if (hasNoEligibleGuestsState()) return { noEligible: true };
       const buttons = Array.from(
@@ -536,7 +678,7 @@ async function initAutoFinder() {
         .filter(
           item =>
             item.minutes !== null &&
-            (targetMinutes === null || item.minutes <= targetMinutes)
+            (maxMinutesExclusive === null || item.minutes < maxMinutesExclusive)
         )
         .sort((a, b) => a.minutes - b.minutes);
 
@@ -547,68 +689,41 @@ async function initAutoFinder() {
     }, 8000);
   }
 
-  async function autoModifyMatch(hit) {
-    const setNoEligibleCooldown = () => {
-      noEligibleRetryUntil.set(
-        hit.attraction,
-        Date.now() + NO_ELIGIBLE_COOLDOWN_MS
-      );
-    };
-
-    const row = findAttractionRow(hit.attraction);
-    if (!row) {
-      setStatus(`Auto-modify retry: ${hit.attraction} row not found.`);
-      return 'retry';
-    }
-
-    const llButton = findLlActionButton(row);
-    if (!llButton) {
-      setStatus(`Auto-modify retry: no LL action button for ${hit.attraction}.`);
-      return 'retry';
-    }
-
-    setStatus(`Auto-modify: opening ${hit.attraction}...`);
-    llButton.click();
+  async function attemptModifyFromCurrentScreen(hit, currentPlanMinutes) {
     const noEligibleScreen = await waitForValue(
       () => (hasNoEligibleGuestsState() ? true : null),
       1800,
       120
     );
     if (noEligibleScreen) {
-      setNoEligibleCooldown();
       setStatus(
         `${hit.attraction}: no eligible guests right now. Retrying later...`
       );
       await exitModifyFlow();
-      return 'retry';
+      return { status: 'noEligible' };
     }
 
-    const targetMinutes = hit.target ? parseTimeToMinutes(hit.target) : null;
-    if (targetMinutes !== null) {
-      const changeBtn = await waitForValue(
-        () => findButtonByText(/^change$/i),
-        10000
-      );
-      if (changeBtn instanceof HTMLButtonElement) changeBtn.click();
-    }
+    const changeBtn = await waitForValue(
+      () => findButtonByText(/^change$/i),
+      6000,
+      120
+    );
+    if (changeBtn instanceof HTMLButtonElement) changeBtn.click();
 
-    const selected = await chooseEarliestReturnTime(targetMinutes);
+    const selected = await chooseEarliestReturnTime(currentPlanMinutes);
     if (!selected) {
-      const targetSuffix =
-        targetMinutes === null ? '' : ` <= ${minutesToTime(targetMinutes)}`;
       setStatus(
-        `Auto-modify: no selectable return time${targetSuffix} for ${hit.attraction}. Continuing search...`
+        `Auto-modify: no earlier selectable return time for ${hit.attraction}. Continuing search...`
       );
       await exitModifyFlow();
-      return 'retry';
+      return { status: 'noEarlier' };
     }
     if (selected.noEligible) {
-      setNoEligibleCooldown();
       setStatus(
         `${hit.attraction}: no eligible guests right now. Retrying later...`
       );
       await exitModifyFlow();
-      return 'retry';
+      return { status: 'noEligible' };
     }
 
     const submitBtn = await waitForValue(
@@ -620,18 +735,107 @@ async function initAutoFinder() {
         `Auto-modify failed: submit button not found for ${hit.attraction}. Continuing search...`
       );
       await exitModifyFlow();
-      return 'failed';
+      return { status: 'failed' };
     }
 
     submitBtn.click();
-    const selectedTime = minutesToTime(selected.minutes);
-    const suffix = hit.target ? ` (target <= ${hit.target})` : '';
-    setStatus(`Auto-modify submitted: ${hit.attraction} ${selectedTime}${suffix}.`);
-    notifyFound(
-      `Auto-modify submitted: ${hit.attraction} at ${selectedTime}${suffix}.`,
-      { blocking: false }
-    );
-    return 'success';
+    return { status: 'success', selectedMinutes: selected.minutes };
+  }
+
+  async function attemptModifyFromPlans(hit, onNoEligible) {
+    const attemptedKeys = new Set();
+    const updates = [];
+    let attemptedCount = 0;
+    let failedCount = 0;
+
+    for (;;) {
+      if (!(await ensurePlansContextForModify())) {
+        setStatus('Auto-modify retry: unable to open Plans tab.');
+        return {
+          status: updates.length > 0 ? 'success' : 'retry',
+          updates,
+          attemptedCount,
+        };
+      }
+
+      const candidates = getPlanRowsForAttraction(hit.attraction).filter(
+        candidate => !attemptedKeys.has(candidate.key)
+      );
+      if (candidates.length === 0) {
+        if (updates.length > 0) {
+          return { status: 'success', updates, attemptedCount };
+        }
+        if (attemptedCount > 0) {
+          return {
+            status: failedCount > 0 ? 'failed' : 'retry',
+            updates,
+            attemptedCount,
+          };
+        }
+        setStatus(`Auto-modify retry: no modifiable plan rows found for ${hit.attraction}.`);
+        return { status: 'retry', updates, attemptedCount };
+      }
+
+      const candidate = candidates[0];
+      attemptedKeys.add(candidate.key);
+      const timeText =
+        candidate.startMinutes >= 0 ? minutesToTime(candidate.startMinutes) : '?';
+      setStatus(
+        `Auto-modify: opening ${candidate.name} plan at ${timeText} (latest first)...`
+      );
+      candidate.modifyButton.click();
+
+      attemptedCount += 1;
+      const result = await attemptModifyFromCurrentScreen(hit, candidate.startMinutes);
+      if (result.status === 'success') {
+        updates.push({
+          fromMinutes: candidate.startMinutes,
+          toMinutes: result.selectedMinutes,
+        });
+        continue;
+      }
+      if (result.status === 'noEligible') {
+        onNoEligible();
+        continue;
+      }
+      if (result.status === 'failed') {
+        failedCount += 1;
+      }
+      // Continue loop and try next matching plan row for this attraction.
+    }
+  }
+
+  async function autoModifyMatch(hit) {
+    const setNoEligibleCooldown = () => {
+      noEligibleRetryUntil.set(
+        hit.attraction,
+        Date.now() + NO_ELIGIBLE_COOLDOWN_MS
+      );
+    };
+    const result = await attemptModifyFromPlans(hit, setNoEligibleCooldown);
+    await returnToLLForPolling();
+
+    if (result.updates && result.updates.length > 0) {
+      const summary = result.updates
+        .map(update => `${minutesToTime(update.fromMinutes)} -> ${minutesToTime(update.toMinutes)}`)
+        .join(' | ');
+      setStatus(
+        `Auto-modify: updated ${result.updates.length} party(s) for ${hit.attraction}. ${summary}. Continuing search...`
+      );
+      notifyFound(
+        `Auto-modify updated ${result.updates.length} party(s) for ${hit.attraction}: ${summary}.`,
+        { blocking: false }
+      );
+      return 'success';
+    }
+
+    if (result.attemptedCount > 0) {
+      setStatus(
+        `Auto-modify checked ${result.attemptedCount} party(s) for ${hit.attraction}; no earlier successful update this cycle. Continuing search...`
+      );
+    }
+
+    return result.status || 'retry';
   }
 
   function saveCurrentSettings() {
@@ -685,12 +889,22 @@ async function initAutoFinder() {
     const hits = [];
     const missing = [];
     const waiting = [];
+    const autoMode = autoModifyInput.checked;
 
     for (const watch of watches) {
       const { attraction, targetTime } = watch;
       const currentMinutes = findAttractionTime(attraction);
       if (currentMinutes === null) {
         missing.push(attraction);
+        continue;
+      }
+
+      if (autoMode) {
+        hits.push({
+          attraction,
+          current: minutesToTime(currentMinutes),
+          target: null,
+        });
         continue;
       }
 
@@ -713,7 +927,7 @@ async function initAutoFinder() {
       const summary = hits
         .map(h => `${h.attraction} ${h.current}${h.target ? ` (<= ${h.target})` : ''}`)
         .join(' | ');
-      if (autoModifyInput.checked) {
+      if (autoMode) {
         if (modifyInProgress) {
           setStatus('Auto-modify already in progress...');
           return false;
@@ -740,11 +954,13 @@ async function initAutoFinder() {
         }
         const firstHit = readyHits[0];
         if (firstHit) {
-          setStatus(`Match found. Auto-modifying: ${firstHit.attraction}...`);
+          setStatus(
+            `Availability found for ${firstHit.attraction} (${firstHit.current}). Checking all matching plan parties...`
+          );
           modifyInProgress = true;
           try {
-            const result = await autoModifyMatch(firstHit);
-            return result === 'success';
+            await autoModifyMatch(firstHit);
+            return false;
           } finally {
             modifyInProgress = false;
           }
@@ -755,6 +971,17 @@ async function initAutoFinder() {
         notifyFound(`Matched targets: ${summary}.`);
         return true;
       }
+    }
+
+    if (autoMode) {
+      if (missing.length === watches.length) {
+        setStatus(`No LL time available yet for watched attractions (${watches.length}).`);
+        return false;
+      }
+      setStatus(
+        `Watching ${watches.length} attraction(s) for earlier times and plan-based updates.${missing.length > 0 ? ` ${missing.length} unavailable.` : ''}`
+      );
+      return false;
     }
 
     if (waiting.length > 0) {
@@ -873,9 +1100,13 @@ async function initAutoFinder() {
   stopBtn.addEventListener('click', stop);
   addWatchBtn.addEventListener('click', () => {
     createWatchRow();
+    updateTargetInputsState();
     saveCurrentSettings();
   });
-  autoModifyInput.addEventListener('change', saveCurrentSettings);
+  autoModifyInput.addEventListener('change', () => {
+    updateTargetInputsState();
+    saveCurrentSettings();
+  });
   intervalInput.addEventListener('change', () => {
     intervalInput.value = String(clampInterval(intervalInput.value));
     saveCurrentSettings();
@@ -884,6 +1115,7 @@ async function initAutoFinder() {
   for (const watch of settings.watches) createWatchRow(watch);
   if (getWatchRows().length === 0) createWatchRow();
   syncWatchRows();
+  updateTargetInputsState();
   setStatus('Ready. Add attraction targets and press Start.');
 
   function scheduleOptionsRefresh() {
