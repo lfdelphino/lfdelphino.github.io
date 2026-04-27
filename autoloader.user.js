@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BG1 Autoloader
 // @namespace    https://bg1.local/
-// @version      1.14
+// @version      1.15
 // @description  Load BG1 (local or prod), auto-refresh targets, and optionally auto-modify on match
 // @author       Luiz Delphino
 // @match        https://disneyworld.disney.go.com/vas/
@@ -26,7 +26,7 @@ const SCRIPT_VERSION =
     GM_info.script &&
     typeof GM_info.script.version === 'string' &&
     GM_info.script.version) ||
-  '1.14';
+  '1.15';
 
 const SETTINGS_KEY = 'bg1.autoloader.settings.v1';
 const PANEL_POS_KEY = 'bg1.autoloader.panelPos.v1';
@@ -520,6 +520,13 @@ async function initAutoFinder() {
     const start = Date.now();
     while (Date.now() - start < timeoutMs) {
       if (hasHomeTabButtons()) return true;
+      const showPlansBtn = findButtonByText(/^show plans$/i);
+      if (showPlansBtn instanceof HTMLButtonElement && isVisible(showPlansBtn)) {
+        showPlansBtn.click();
+        // eslint-disable-next-line no-await-in-loop
+        await sleep(250);
+        continue;
+      }
       const backBtn = document.querySelector('button[title="Go Back"]');
       if (backBtn instanceof HTMLButtonElement && isVisible(backBtn)) {
         backBtn.click();
@@ -571,6 +578,32 @@ async function initAutoFinder() {
 
   async function returnToLLForPolling() {
     await switchToTab('LL');
+  }
+
+  async function clickShowPlansAfterModify(attraction) {
+    const showPlansBtn = await waitForValue(
+      () => findButtonByText(/^show plans$/i),
+      5000,
+      120
+    );
+    if (!(showPlansBtn instanceof HTMLButtonElement)) return false;
+    showPlansBtn.click();
+    const plansReady = await waitForValue(
+      () => (isOnPlansTab() ? true : null),
+      4000,
+      120
+    );
+    if (plansReady) {
+      setStatus(
+        `[Modify] ${attraction}: clicked Show Plans and returned to Plans tab.`
+      );
+      return true;
+    }
+    setStatus(
+      `[Modify] ${attraction}: clicked Show Plans but Plans tab is not confirmed yet.`,
+      { level: 'warn' }
+    );
+    return false;
   }
 
   function findLlActionButton(row) {
@@ -919,6 +952,7 @@ async function initAutoFinder() {
       `[Modify] ${hit.attraction}: submitted modify request ${formatPlanTime(currentPlanMinutes)} -> ${formatPlanTime(selected.minutes)}.`,
       { level: 'success' }
     );
+    await clickShowPlansAfterModify(hit.attraction);
     return { status: 'success', selectedMinutes: selected.minutes };
   }
 
