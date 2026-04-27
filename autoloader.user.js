@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BG1 Autoloader
 // @namespace    https://bg1.local/
-// @version      1.12
+// @version      1.13
 // @description  Load BG1 (local or prod), auto-refresh targets, and optionally auto-modify on match
 // @author       Luiz Delphino
 // @match        https://disneyworld.disney.go.com/vas/
@@ -20,6 +20,13 @@ const CONFIG = {
   pollIntervalSec: 15,
   postRefreshDelayMs: 1800,
 };
+const SCRIPT_VERSION =
+  (typeof GM_info !== 'undefined' &&
+    GM_info &&
+    GM_info.script &&
+    typeof GM_info.script.version === 'string' &&
+    GM_info.script.version) ||
+  '1.13';
 
 const SETTINGS_KEY = 'bg1.autoloader.settings.v1';
 const PANEL_POS_KEY = 'bg1.autoloader.panelPos.v1';
@@ -92,7 +99,7 @@ async function initAutoFinder() {
   panel.innerHTML = `
     <div id="bg1af-drag-handle" style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px;cursor:move;user-select:none;touch-action:none;">
       <strong style="font-size:13px;">BG1 Auto Finder</strong>
-      <span id="bg1af-mode" style="opacity:.75;">${CONFIG.mode.toUpperCase()}</span>
+      <span id="bg1af-mode" style="opacity:.75;">${CONFIG.mode.toUpperCase()} v${SCRIPT_VERSION}</span>
     </div>
 
     <label style="display:block;margin-bottom:6px;">Attractions to Watch/Modify</label>
