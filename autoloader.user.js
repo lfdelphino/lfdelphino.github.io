@@ -72,8 +72,6 @@ async function initAutoFinder() {
   let optionRefreshPending = false;
   let evaluatePending = false;
   let modifyInProgress = false;
-  const noEligibleRetryUntil = new Map();
-  const NO_ELIGIBLE_COOLDOWN_MS = 90_000;
 
   const panel = document.createElement('div');
   panel.id = 'bg1af-panel';
@@ -117,6 +115,7 @@ async function initAutoFinder() {
     </div>
 
     <div id="bg1af-status" style="opacity:.9;min-height:2.7em;">Idle</div>
+    <div id="bg1af-log" style="margin-top:6px;max-height:140px;overflow:auto;padding:6px;border-radius:5px;background:#1b1b1b;border:1px solid #333;font-family:Consolas,'Courier New',monospace;font-size:11px;line-height:1.35;"></div>
   `;
 
   document.body.appendChild(panel);
@@ -128,6 +127,7 @@ async function initAutoFinder() {
   const startBtn = panel.querySelector('#bg1af-start');
   const stopBtn = panel.querySelector('#bg1af-stop');
   const status = panel.querySelector('#bg1af-status');
+  const logBox = panel.querySelector('#bg1af-log');
   const dragHandle = panel.querySelector('#bg1af-drag-handle');
 
   if (
@@ -138,6 +138,7 @@ async function initAutoFinder() {
     !(startBtn instanceof HTMLButtonElement) ||
     !(stopBtn instanceof HTMLButtonElement) ||
     !(status instanceof HTMLDivElement) ||
+    !(logBox instanceof HTMLDivElement) ||
     !(dragHandle instanceof HTMLDivElement)
   ) {
     return;
@@ -206,8 +207,53 @@ async function initAutoFinder() {
     savePanelPos(pos);
   });
 
-  function setStatus(text) {
+  const MAX_STATUS_LOGS = 12;
+  const statusLogs = [];
+  let statusPinUntil = 0;
+
+  function appendStatusLog(text, level = 'info') {
+    const timestamp = new Date().toLocaleTimeString();
+    statusLogs.push({ timestamp, text, level });
+    if (statusLogs.length > MAX_STATUS_LOGS) statusLogs.shift();
+
+    logBox.innerHTML = '';
+    for (const entry of statusLogs) {
+      const line = document.createElement('div');
+      line.style.whiteSpace = 'pre-wrap';
+      line.style.wordBreak = 'break-word';
+      if (entry.level === 'error') line.style.color = '#ff9a9a';
+      else if (entry.level === 'success') line.style.color = '#9cffc0';
+      else if (entry.level === 'warn') line.style.color = '#ffd27f';
+      else line.style.color = '#e7e7e7';
+      line.textContent = `[${entry.timestamp}] ${entry.text}`;
+      logBox.appendChild(line);
+    }
+    logBox.scrollTop = logBox.scrollHeight;
+  }
+
+  function inferStatusLevel(text) {
+    const lower = String(text || '').toLowerCase();
+    if (lower.includes('error') || lower.includes('failed')) return 'error';
+    if (lower.includes('found') || lower.includes('updated') || lower.includes('started')) {
+      return 'success';
+    }
+    if (lower.includes('retry') || lower.includes('no ll time') || lower.includes('unable')) {
+      return 'warn';
+    }
+    return 'info';
+  }
+
+  function setStatus(text, options = {}) {
+    const level = options.level || inferStatusLevel(text);
+    const holdMs = Number(options.holdMs) || 0;
+    const force = options.force === true;
+    const now = Date.now();
+
+    appendStatusLog(text, level);
+    if (!force && now < statusPinUntil) return;
+
     status.textContent = text;
+    if (holdMs > 0) statusPinUntil = now + holdMs;
   }
 
   function getAttractionRows() {
@@ -697,7 +743,7 @@ async function initAutoFinder() {
     );
     if (noEligibleScreen) {
       setStatus(
-        `${hit.attraction}: no eligible guests right now. Retrying later...`
+        `${hit.attraction}: no eligible guests right now. Skipping this party for now...`
       );
       await exitModifyFlow();
       return { status: 'noEligible' };
@@ -720,7 +766,7 @@ async function initAutoFinder() {
     }
     if (selected.noEligible) {
       setStatus(
-        `${hit.attraction}: no eligible guests right now. Retrying later...`
+        `${hit.attraction}: no eligible guests right now. Skipping this party for now...`
       );
       await exitModifyFlow();
       return { status: 'noEligible' };
@@ -742,7 +788,7 @@ async function initAutoFinder() {
     return { status: 'success', selectedMinutes: selected.minutes };
   }
 
-  async function attemptModifyFromPlans(hit, onNoEligible) {
+  async function attemptModifyFromPlans(hit) {
     const attemptedKeys = new Set();
     const updates = [];
     let attemptedCount = 0;
@@ -795,7 +841,6 @@ async function initAutoFinder() {
         continue;
       }
       if (result.status === 'noEligible') {
-        onNoEligible();
         continue;
       }
       if (result.status === 'failed') {
@@ -806,13 +851,7 @@ async function initAutoFinder() {
   }
 
   async function autoModifyMatch(hit) {
-    const setNoEligibleCooldown = () => {
-      noEligibleRetryUntil.set(
-        hit.attraction,
-        Date.now() + NO_ELIGIBLE_COOLDOWN_MS
-      );
-    };
-    const result = await attemptModifyFromPlans(hit, setNoEligibleCooldown);
+    const result = await attemptModifyFromPlans(hit);
     await returnToLLForPolling();
 
     if (result.updates && result.updates.length > 0) {
@@ -820,7 +859,8 @@ async function initAutoFinder() {
         .map(update => `${minutesToTime(update.fromMinutes)} -> ${minutesToTime(update.toMinutes)}`)
         .join(' | ');
       setStatus(
-        `Auto-modify: updated ${result.updates.length} party(s) for ${hit.attraction}. ${summary}. Continuing search...`
+        `Auto-modify: updated ${result.updates.length} party(s) for ${hit.attraction}. ${summary}. Continuing search...`,
+        { level: 'success', holdMs: 4000 }
       );
       notifyFound(
         `Auto-modify updated ${result.updates.length} party(s) for ${hit.attraction}: ${summary}.`,
@@ -932,30 +972,11 @@ async function initAutoFinder() {
           setStatus('Auto-modify already in progress...');
           return false;
         }
-        const now = Date.now();
-        const readyHits = hits.filter(
-          h => (noEligibleRetryUntil.get(h.attraction) || 0) <= now
-        );
-        const blockedHits = hits.filter(
-          h => (noEligibleRetryUntil.get(h.attraction) || 0) > now
-        );
-        if (readyHits.length === 0 && blockedHits.length > 0) {
-          const nextRetry = Math.max(
-            1,
-            Math.ceil(
-              ((noEligibleRetryUntil.get(blockedHits[0].attraction) || now) - now) /
-                1000
-            )
-          );
-          setStatus(
-            `Match found but waiting eligibility retry (${blockedHits.length} blocked, next in ~${nextRetry}s).`
-          );
-          return false;
-        }
-        const firstHit = readyHits[0];
+        const firstHit = hits[0];
         if (firstHit) {
           setStatus(
-            `Availability found for ${firstHit.attraction} (${firstHit.current}). Checking all matching plan parties...`
+            `Availability found for ${firstHit.attraction} (${firstHit.current}). Checking all matching plan parties...`,
+            { level: 'success', holdMs: 4000 }
           );
           modifyInProgress = true;
           try {
@@ -1028,8 +1049,12 @@ async function initAutoFinder() {
           stop();
           return;
         }
-      } catch {
-        setStatus('Auto finder error. Continuing search...');
+      } catch (error) {
+        const reason =
+          error && typeof error.message === 'string'
+            ? error.message
+            : String(error || 'unknown error');
+        setStatus(`Auto finder error: ${reason}. Continuing search...`, { level: 'error' });
       }
       cycleBusy = false;
       scheduleNextCycle();
@@ -1050,8 +1075,12 @@ async function initAutoFinder() {
       if (!running || cycleBusy || modifyInProgress) return;
       try {
         if (await evaluateMatch()) stop();
-      } catch {
-        setStatus('Auto finder error. Continuing search...');
+      } catch (error) {
+        const reason =
+          error && typeof error.message === 'string'
+            ? error.message
+            : String(error || 'unknown error');
+        setStatus(`Auto finder error: ${reason}. Continuing search...`, { level: 'error' });
       }
     }, 300);
   }
