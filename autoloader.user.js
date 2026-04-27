@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BG1 Autoloader
 // @namespace    https://bg1.local/
-// @version      1.13
+// @version      1.14
 // @description  Load BG1 (local or prod), auto-refresh targets, and optionally auto-modify on match
 // @author       Luiz Delphino
 // @match        https://disneyworld.disney.go.com/vas/
@@ -26,7 +26,7 @@ const SCRIPT_VERSION =
     GM_info.script &&
     typeof GM_info.script.version === 'string' &&
     GM_info.script.version) ||
-  '1.13';
+  '1.14';
 
 const SETTINGS_KEY = 'bg1.autoloader.settings.v1';
 const PANEL_POS_KEY = 'bg1.autoloader.panelPos.v1';
@@ -214,7 +214,7 @@ async function initAutoFinder() {
     savePanelPos(pos);
   });
 
-  const MAX_STATUS_LOGS = 12;
+  const MAX_STATUS_LOGS = 40;
   const statusLogs = [];
   let statusPinUntil = 0;
 
@@ -562,7 +562,11 @@ async function initAutoFinder() {
       3000,
       120
     );
-    return !!ready;
+    if (!ready) return false;
+    if (getAllPlanRows().length === 0) {
+      await waitForValue(() => (getAllPlanRows().length > 0 ? true : null), 2000, 120);
+    }
+    return true;
   }
 
   async function returnToLLForPolling() {
@@ -622,43 +626,134 @@ async function initAutoFinder() {
     return parsed === null ? -1 : parsed;
   }
 
+  function formatPlanTime(minutes) {
+    return Number.isFinite(minutes) && minutes >= 0 ? minutesToTime(minutes) : '?';
+  }
+
+  function isPlanRowMatchForAttraction(nameLower, rowTextLower, target) {
+    if (!target) return false;
+    return (
+      (!!nameLower &&
+        (nameLower === target ||
+          nameLower.includes(target) ||
+          target.includes(nameLower))) ||
+      rowTextLower.includes(target)
+    );
+  }
+
+  function getAllPlanRows() {
+    const primary = Array.from(document.querySelectorAll('li[data-testid="plan"]'));
+    if (primary.length > 0) return primary;
+
+    return Array.from(document.querySelectorAll('li')).filter(row =>
+      Array.from(row.querySelectorAll('button')).some(btn => {
+        if (!(btn instanceof HTMLButtonElement)) return false;
+        const label = normalizeText(
+          btn.getAttribute('title') || btn.getAttribute('aria-label') || btn.textContent || ''
+        ).toLowerCase();
+        return label.includes('more info') || label.includes('details');
+      })
+    );
+  }
+
+  function getPlanRowName(row) {
+    const nameEl =
+      row.querySelector('div.text-lg') ||
+      row.querySelector('div[class*="text-lg"]') ||
+      row.querySelector('h3') ||
+      row.querySelector('[role="heading"]');
+    return normalizeText(nameEl?.textContent || '');
+  }
+
+  function getPlanRowAction(row) {
+    const buttons = Array.from(row.querySelectorAll('button')).filter(isVisible);
+    const modifyBtn = buttons.find(btn => {
+      if (!(btn instanceof HTMLButtonElement)) return false;
+      const text = normalizeText(
+        btn.textContent || btn.getAttribute('aria-label') || btn.getAttribute('title') || ''
+      ).toLowerCase();
+      return text.includes('modify');
+    });
+    if (modifyBtn instanceof HTMLButtonElement) {
+      return { button: modifyBtn, action: 'modify' };
+    }
+
+    const infoBtn = buttons.find(btn => {
+      if (!(btn instanceof HTMLButtonElement)) return false;
+      const text = normalizeText(
+        btn.getAttribute('title') || btn.getAttribute('aria-label') || btn.textContent || ''
+      ).toLowerCase();
+      return text.includes('more info') || text.includes('details');
+    });
+    if (infoBtn instanceof HTMLButtonElement) {
+      return { button: infoBtn, action: 'details' };
+    }
+    return null;
+  }
+
+  function getPlanRowDescriptors(attraction) {
+    const target = normalizeText(attraction).toLowerCase();
+    const rows = getAllPlanRows();
+    return rows.map((row, index) => {
+      const name = getPlanRowName(row);
+      const nameLower = name.toLowerCase();
+      const rowTextLower = normalizeText(row.textContent || '').toLowerCase();
+      const matchesAttraction = isPlanRowMatchForAttraction(
+        nameLower,
+        rowTextLower,
+        target
+      );
+      const rowAction = getPlanRowAction(row);
+      const startMinutes = parsePlanRowStartMinutes(row);
+      return {
+        row,
+        index,
+        name,
+        nameLower,
+        startMinutes,
+        rowAction,
+        matchesAttraction,
+      };
+    });
+  }
+
+  function summarizePlanSnapshot(attraction, maxItems = 8) {
+    const descriptors = getPlanRowDescriptors(attraction);
+    const matched = descriptors.filter(d => d.matchesAttraction);
+    const relevant = matched.length > 0 ? matched : descriptors;
+    const sorted = [...relevant].sort((a, b) => b.startMinutes - a.startMinutes);
+    const shown = sorted.slice(0, maxItems);
+    const details = shown
+      .map(d => {
+        const name = d.name || '(unnamed)';
+        const action = d.rowAction ? d.rowAction.action : 'no-action';
+        return `${name}@${formatPlanTime(d.startMinutes)}[${action}]`;
+      })
+      .join(' | ');
+    const remaining = sorted.length > shown.length ? ` +${sorted.length - shown.length} more` : '';
+    return {
+      totalRows: descriptors.length,
+      matchedRows: matched.length,
+      details: details || 'none',
+      detailsWithRemaining: `${details || 'none'}${remaining}`,
+    };
+  }
+
   function getPlanRowsForAttraction(attraction) {
     const target = normalizeText(attraction).toLowerCase();
-    const rows = Array.from(document.querySelectorAll('li[data-testid="plan"]'));
-
-    return rows
-      .map((row, index) => {
-        const nameEl =
-          row.querySelector('div.text-lg') ||
-          row.querySelector('div[class*="text-lg"]');
-        const name = normalizeText(nameEl?.textContent || '');
-        const nameLower = name.toLowerCase();
-        const matchesAttraction =
-          !!name &&
-          (nameLower === target ||
-            nameLower.includes(target) ||
-            target.includes(nameLower));
-        if (!matchesAttraction) return null;
-
-        const modifyButton = Array.from(row.querySelectorAll('button')).find(
-          btn =>
-            btn instanceof HTMLButtonElement &&
-            isVisible(btn) &&
-            /^modify$/i.test(normalizeText(btn.textContent))
-        );
-        if (!(modifyButton instanceof HTMLButtonElement)) return null;
-
-        const startMinutes = parsePlanRowStartMinutes(row);
-        if (startMinutes < 0) return null;
-        return {
-          row,
-          name,
-          startMinutes,
-          modifyButton,
-          key: `${nameLower}|${startMinutes}|${index}`,
-        };
-      })
-      .filter(Boolean)
+    const descriptors = getPlanRowDescriptors(attraction);
+    return descriptors
+      .filter(
+        d => d.matchesAttraction && d.rowAction && Number.isFinite(d.startMinutes) && d.startMinutes >= 0
+      )
+      .map(d => ({
+        row: d.row,
+        name: d.name || attraction,
+        startMinutes: d.startMinutes,
+        openButton: d.rowAction.button,
+        openAction: d.rowAction.action,
+        key: `${d.nameLower || target}|${d.startMinutes}|${d.index}`,
+      }))
       .sort((a, b) => b.startMinutes - a.startMinutes);
   }
 
@@ -718,7 +813,8 @@ async function initAutoFinder() {
   }
 
   async function chooseEarliestReturnTime(maxMinutesExclusive) {
-    return waitForValue(() => {
+    let observed = { totalButtons: 0, totalEarlierOptions: 0 };
+    const selected = await waitForValue(() => {
       if (hasNoEligibleGuestsState()) return { noEligible: true };
       const buttons = Array.from(
         document.querySelectorAll('[data-testid="time-buttons"] button')
@@ -734,15 +830,28 @@ async function initAutoFinder() {
             (maxMinutesExclusive === null || item.minutes < maxMinutesExclusive)
         )
         .sort((a, b) => a.minutes - b.minutes);
+      observed = {
+        totalButtons: buttons.length,
+        totalEarlierOptions: candidates.length,
+      };
 
       const chosen = candidates[0];
       if (!chosen || !(chosen.btn instanceof HTMLButtonElement)) return null;
       chosen.btn.click();
-      return { minutes: chosen.minutes };
+      return {
+        minutes: chosen.minutes,
+        totalButtons: buttons.length,
+        totalEarlierOptions: candidates.length,
+      };
     }, 8000);
+    if (selected) return selected;
+    return { noSelection: true, ...observed };
   }
 
   async function attemptModifyFromCurrentScreen(hit, currentPlanMinutes) {
+    setStatus(
+      `[Modify] ${hit.attraction}: entered modify flow for current plan ${formatPlanTime(currentPlanMinutes)}.`
+    );
     const noEligibleScreen = await waitForValue(
       () => (hasNoEligibleGuestsState() ? true : null),
       1800,
@@ -761,12 +870,23 @@ async function initAutoFinder() {
       6000,
       120
     );
-    if (changeBtn instanceof HTMLButtonElement) changeBtn.click();
+    if (changeBtn instanceof HTMLButtonElement) {
+      changeBtn.click();
+      setStatus(`[Modify] ${hit.attraction}: clicked Change button.`);
+    } else {
+      setStatus(
+        `[Modify] ${hit.attraction}: Change button not found, checking time buttons directly...`,
+        { level: 'warn' }
+      );
+    }
 
     const selected = await chooseEarliestReturnTime(currentPlanMinutes);
-    if (!selected) {
+    if (!selected || selected.noSelection) {
+      const totalButtons = Number(selected?.totalButtons) || 0;
+      const totalEarlier = Number(selected?.totalEarlierOptions) || 0;
       setStatus(
-        `Auto-modify: no earlier selectable return time for ${hit.attraction}. Continuing search...`
+        `Auto-modify: no earlier selectable return time for ${hit.attraction}. Observed ${totalButtons} button(s), ${totalEarlier} earlier option(s). Continuing search...`,
+        { level: 'warn' }
       );
       await exitModifyFlow();
       return { status: 'noEarlier' };
@@ -778,6 +898,9 @@ async function initAutoFinder() {
       await exitModifyFlow();
       return { status: 'noEligible' };
     }
+    setStatus(
+      `[Modify] ${hit.attraction}: selected earlier time ${formatPlanTime(selected.minutes)}. Looking for submit button...`
+    );
 
     const submitBtn = await waitForValue(
       () => findButtonByText(/^(modify|book) lightning lane$/i),
@@ -792,6 +915,10 @@ async function initAutoFinder() {
     }
 
     submitBtn.click();
+    setStatus(
+      `[Modify] ${hit.attraction}: submitted modify request ${formatPlanTime(currentPlanMinutes)} -> ${formatPlanTime(selected.minutes)}.`,
+      { level: 'success' }
+    );
     return { status: 'success', selectedMinutes: selected.minutes };
   }
 
@@ -803,13 +930,20 @@ async function initAutoFinder() {
 
     for (;;) {
       if (!(await ensurePlansContextForModify())) {
-        setStatus('Auto-modify retry: unable to open Plans tab.');
+        setStatus('Auto-modify retry: unable to open Plans tab (Refresh Plans not detected).', {
+          level: 'error',
+        });
         return {
           status: updates.length > 0 ? 'success' : 'retry',
           updates,
           attemptedCount,
         };
       }
+
+      const snapshot = summarizePlanSnapshot(hit.attraction);
+      setStatus(
+        `[Plans snapshot] ${hit.attraction}: matched ${snapshot.matchedRows}/${snapshot.totalRows}. Assigned times: ${snapshot.detailsWithRemaining}.`
+      );
 
       const candidates = getPlanRowsForAttraction(hit.attraction).filter(
         candidate => !attemptedKeys.has(candidate.key)
@@ -825,7 +959,10 @@ async function initAutoFinder() {
             attemptedCount,
           };
         }
-        setStatus(`Auto-modify retry: no modifiable plan rows found for ${hit.attraction}.`);
+        setStatus(
+          `Auto-modify retry: no modifiable plan rows found for ${hit.attraction}. Snapshot: matched ${snapshot.matchedRows}/${snapshot.totalRows}; ${snapshot.detailsWithRemaining}.`,
+          { level: 'warn' }
+        );
         return { status: 'retry', updates, attemptedCount };
       }
 
@@ -834,9 +971,10 @@ async function initAutoFinder() {
       const timeText =
         candidate.startMinutes >= 0 ? minutesToTime(candidate.startMinutes) : '?';
       setStatus(
-        `Auto-modify: opening ${candidate.name} plan at ${timeText} (latest first)...`
+        `Auto-modify: opening ${candidate.name} plan at ${timeText} via ${candidate.openAction} (latest first)...`
       );
-      candidate.modifyButton.click();
+      candidate.openButton.click();
+      await sleep(200);
 
       attemptedCount += 1;
       const result = await attemptModifyFromCurrentScreen(hit, candidate.startMinutes);
