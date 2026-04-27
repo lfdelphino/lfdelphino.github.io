@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BG1 Autoloader
 // @namespace    https://bg1.local/
-// @version      1.15
+// @version      1.16
 // @description  Load BG1 (local or prod), auto-refresh targets, and optionally auto-modify on match
 // @author       Luiz Delphino
 // @match        https://disneyworld.disney.go.com/vas/
@@ -26,7 +26,7 @@ const SCRIPT_VERSION =
     GM_info.script &&
     typeof GM_info.script.version === 'string' &&
     GM_info.script.version) ||
-  '1.15';
+  '1.16';
 
 const SETTINGS_KEY = 'bg1.autoloader.settings.v1';
 const PANEL_POS_KEY = 'bg1.autoloader.panelPos.v1';
